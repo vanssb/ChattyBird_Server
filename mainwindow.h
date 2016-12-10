@@ -21,6 +21,7 @@ private:
     Server server;
 private slots:
     void startServer();
+    void stopServer();
     void error();
     void message();
 };

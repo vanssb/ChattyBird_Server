@@ -10,6 +10,7 @@ MainWindow::MainWindow(QWidget *parent) :
     connect( ui->start, SIGNAL(clicked(bool)), this, SLOT(startServer()) );
     connect( &server, SIGNAL(newMessage()), this, SLOT(message()) );
     connect( &server, SIGNAL(error()), this, SLOT(error()) );
+    connect( ui->stop, SIGNAL(clicked(bool)), this, SLOT(stopServer()) );
 }
 
 MainWindow::~MainWindow()
@@ -28,4 +29,8 @@ void MainWindow::error(){
 void MainWindow::message(){
     ui->logs->append( "[" + QTime::currentTime().toString("hh:mm:ss") + "] " +
                       server.getMessage() );
+}
+
+void MainWindow::stopServer(){
+   server.stop();
 }
