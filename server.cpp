@@ -1,5 +1,4 @@
 #include "server.h"
-#include <QDataStream>
 #include <codes.h>
 #include <QSqlQuery>
 #include <QCoreApplication>
@@ -9,6 +8,8 @@ Server::Server(QObject *parent) : QObject(parent)
 {
     connect( &socket, SIGNAL(newConnection()), this, SLOT(newConnection()) );
     serverStatus = 0;
+    inputTrafficSize = 0;
+    outputTrafficSize = 0;
 }
 
 void Server::start(quint16 port){
@@ -22,6 +23,10 @@ void Server::start(quint16 port){
         serverStatus = 0;
         emit error();
     }
+}
+
+Server::~Server(){
+    stop();
 }
 
 void Server::newConnection(){
@@ -64,39 +69,34 @@ void Server::readyRead(){
     //ждем пока блок прийдет полностью
     if (clients[key].socket->bytesAvailable() < clients[key].blockSize)
         return;
-    else
+    else{
         //можно принимать новый блок
+        inputTrafficSize += ( clients[key].blockSize + sizeof(clients[key].blockSize) );
         clients[key].blockSize = 0;
+    }
     //3 байта - команда серверу
     quint8 command;
     in >> command;
-    switch (command) {
-    case Codes::auth:
-        in >> clients[key].name;
-        in >> clients[key].password;
-        sendAuthResponse( clients[key], authorize(clients[key]) );
-    break;
-    case Codes::messagePublic:
-        if (clients[key].isAuthed){
-            QString text;
-            in >> text;
-            sendPublicMessage( clients[key], text );
-        }
-    break;
-    }
+    parseData( command, in , clients[key]);
 }
 
 int Server::authorize(Client &client){
     data = QSqlDatabase::addDatabase("QSQLITE");
     QString path = QCoreApplication::applicationDirPath()+"/Data/Information.db";
+    foreach( Client value, clients ){
+        if (value.name == client.name && value.isAuthed)
+            return Codes::authAlreadyOnline;
+    }
     data.setDatabaseName(path);
     if (data.open()){
         QString request = "SELECT Nickname, COUNT(*) AS count FROM Users WHERE Name='" + client.name + "' AND Password='" + client.password +"'";
         QSqlQuery q( request );
         q.first();
         int count = q.value("count").toInt();
+        QString nickname = q.value("Nickname").toString();
+        data.close();
         if(count > 0){
-            client.nickname = q.value("Nickname").toString();
+            client.nickname = nickname;
             client.isAuthed = true;
             return Codes::authSuccess;
         }
@@ -108,24 +108,25 @@ int Server::authorize(Client &client){
     }
 }
 
-void Server::sendAuthResponse(Client &client, int code){
+void Server::sendAuthResponse(Client &client, quint8 code){
     QByteArray block;
     QDataStream out(&block, QIODevice::WriteOnly);
-    out << (quint64)0 << Codes::auth << code;
+    out << (quint64)0 << code;
     out.device()->seek(0);
     if (code == Codes::authSuccess){
         message = "Client " + QString::number(client.socket->socketDescriptor()) +
                   " logined as " + client.name;
         emit newMessage();
+        emit stateUpdated();
     }
 //вписываем размер блока на зарезервированное место
     out << (quint64)(block.size() - sizeof(quint64));
+    outputTrafficSize += ( block.size() );
     client.socket->write(block);
 }
 
 void Server::disconnected(){
-    QTcpSocket* clientSocket = (QTcpSocket*)sender();
-    int key = clientSocket->socketDescriptor();
+    updateState();
 }
 
 void Server::stop(){
@@ -141,19 +142,110 @@ void Server::stop(){
 }
 
 void Server::sendPublicMessage(Client &sender,QString message){
-    QString text = "[" + QTime::currentTime().toString("hh:mm:ss") + "] " +
-                   sender.nickname + ": " + message;
     foreach( Client value, clients ){
         QByteArray block;
         QDataStream out(&block, QIODevice::WriteOnly);
         // надо придумать коды ко всем операциям
         quint8 command;
         command = Codes::messagePublic;
-        out << (quint64)0 << command  << text;
+        out << (quint64)0 << command  << sender.nickname << message;
         out.device()->seek(0);
     //вписываем размер блока на зарезервированное место
         out << (quint64)(block.size() - sizeof(quint64));
+        outputTrafficSize += ( block.size() );
         value.socket->write(block);
     }
 }
 
+QString Server::getInputTrafficSize(){
+    return QString::number( inputTrafficSize );
+}
+
+QString Server::getOutputTrafficSize(){
+    return QString::number( outputTrafficSize );
+}
+
+void Server::updateState(){
+    foreach( int key, clients.keys() ){
+        if (clients[key].socket->socketDescriptor() == -1 || !clients[key].isAuthed){
+            clients[key].socket->deleteLater();
+            clients.remove(key);
+        }
+    }
+    emit stateUpdated();
+}
+
+QStringList Server::getUsersNameList(){
+    QStringList list;
+    foreach( Client value, clients ){
+        list.append(value.name);
+    }
+    return list;
+}
+
+void Server::parseData(quint8 command, QDataStream &in, Client &currentClient){
+    switch (command) {
+    case Codes::authRequest:
+        in >> currentClient.name;
+        in >> currentClient.password;
+        sendAuthResponse( currentClient, authorize(currentClient) );
+    break;
+    case Codes::messagePublic:
+        if (currentClient.isAuthed){
+            QString text;
+            in >> text;
+            sendPublicMessage( currentClient, text );
+        }
+    break;
+    case Codes::signUpRequest:
+        in >> currentClient.name;
+        in >> currentClient.password;
+        in >> currentClient.nickname;
+        sendSignUpResponce(currentClient);
+    break;
+    }
+}
+
+int Server::checkSignUpData(Client &client){
+    data = QSqlDatabase::addDatabase("QSQLITE");
+    QString path = QCoreApplication::applicationDirPath()+"/Data/Information.db";
+    data.setDatabaseName(path);
+    if (data.open()){
+        QString request = "SELECT Nickname, COUNT(*) AS count FROM Users WHERE Name='" + client.name + "' OR Nickname='" + client.nickname +"'";
+        QSqlQuery q( request );
+        q.first();
+        int count = q.value("count").toInt();
+        data.close();
+        if (count)
+            return Codes::signUpNameNotVacant;
+        else{
+            signUpUser(client);
+            return Codes::signUpSuccess;
+        }
+    }
+    return Codes::signUpProblem;
+}
+
+void Server::signUpUser(Client &client){
+    data = QSqlDatabase::addDatabase("QSQLITE");
+    QString path = QCoreApplication::applicationDirPath()+"/Data/Information.db";
+    data.setDatabaseName(path);
+    if (data.open()){
+        QString request = "INSERT INTO Users (Name,Password,Nickname) VALUES('"+client.name+"','"+client.password+"','"+client.nickname+"')";
+        QSqlQuery q;
+        q.exec( request );
+        data.close();
+    }
+}
+
+void Server::sendSignUpResponce(Client &client){
+    quint8 code = checkSignUpData(client);
+    QByteArray block;
+    QDataStream out(&block, QIODevice::WriteOnly);
+    out << (quint64)0 << code;
+    out.device()->seek(0);
+//вписываем размер блока на зарезервированное место
+    out << (quint64)(block.size() - sizeof(quint64));
+    outputTrafficSize += ( block.size() );
+    client.socket->write(block);
+}

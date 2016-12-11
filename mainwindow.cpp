@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 #include <QTime>
 
+
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow)
@@ -11,6 +12,10 @@ MainWindow::MainWindow(QWidget *parent) :
     connect( &server, SIGNAL(newMessage()), this, SLOT(message()) );
     connect( &server, SIGNAL(error()), this, SLOT(error()) );
     connect( ui->stop, SIGNAL(clicked(bool)), this, SLOT(stopServer()) );
+    connect( &timer, SIGNAL(timeout()), this, SLOT(updateStats()) );
+    connect( &server, SIGNAL( stateUpdated() ), this, SLOT( serverUpdated() ) );
+    timer.setInterval(100);
+    timer.start();
 }
 
 MainWindow::~MainWindow()
@@ -32,5 +37,15 @@ void MainWindow::message(){
 }
 
 void MainWindow::stopServer(){
-   server.stop();
+    server.stop();
+}
+
+void MainWindow::updateStats(){
+    ui->inputBytesMeter->display( server.getInputTrafficSize() );
+    ui->outputBytesMeter->display( server.getOutputTrafficSize() );
+}
+
+void MainWindow::serverUpdated(){
+    ui->usersList->clear();
+    ui->usersList->addItems(server.getUsersNameList());
 }
